@@ -26,11 +26,19 @@ import {
   Upload,
   Volume2,
 } from 'lucide-react';
-import type { PageProps, Mode, Feedback, Question } from '../types';
+import type {
+  PageProps,
+  Mode,
+  Feedback,
+  PracticeSnapshot,
+  Attempt,
+  AudioAttachment,
+} from '../types';
 import { questions } from '../data/questions';
 import { inDays, uid } from '../lib/store';
 import { request, errorMessage } from '../lib/api';
 import { useRecorder } from '../lib/useRecorder';
+import { saveAudio, deleteAudio } from '../lib/audioStore';
 import { Empty } from './UI';
 const audioExtensionsByMime: Record<string, string> = {
   'audio/webm': 'webm',
@@ -67,6 +75,7 @@ type Props = PageProps & {
   simulationIndex: number;
   simulationCount: number;
   onNext: () => void;
+  snapshot?: PracticeSnapshot;
 };
 export default function Practice({
   state,
@@ -81,82 +90,110 @@ export default function Practice({
   simulationCount,
   onNext,
   startPractice,
+  snapshot,
 }: Props) {
-  const project = state.profile.projects.find((p) => 'project:' + p.id === target),
-    isIntro = target === 'intro';
+  const project = snapshot
+    ? snapshot.project
+    : state.profile.projects.find((p) => 'project:' + p.id === target);
+  const baseKind: PracticeSnapshot['kind'] =
+    snapshot?.kind ??
+    (target === 'intro'
+      ? 'intro'
+      : project
+        ? 'project'
+        : target === 'reverse'
+          ? 'reverse'
+          : target === 'clarify'
+            ? 'clarify'
+            : 'technical');
+  const isIntro = baseKind === 'intro';
+  const job = snapshot ? snapshot.job : { role: state.plan.role, jd: state.plan.jd || '' };
   const q =
     questions.find((q) => q.id === target) ??
     questions.find((q) => q.category === state.plan.track) ??
     questions[0];
   const context = useMemo(
     () =>
-      isIntro
+      snapshot
         ? {
-            title: '自我介绍',
-            question: 'Could you tell me a little about yourself?',
-            translation: '请介绍一下你自己，重点说说与你申请岗位相关的经历。',
-            reference: state.intro,
-            points: [
-              '说明当前专业方向',
-              '介绍一项与岗位相关的真实经历',
-              '区分个人贡献和团队成果',
-              '简洁说明下一步发展方向',
-            ],
-            followups: ['What part of your recent work are you most proud of?'],
+            title: snapshot.title,
+            question: snapshot.question,
+            translation: snapshot.translation || '',
+            reference: snapshot.reference || '',
+            points: snapshot.kind === 'followup' ? [] : snapshot.points,
+            followups: [],
           }
-        : project
+        : isIntro
           ? {
-              title: project.name,
-              question:
-                'Walk me through a project you worked on. What was your contribution, and why did you choose that approach?',
-              translation: '介绍一个你做过的项目，解释你的个人贡献与方案选择。',
-              reference: '',
+              title: '自我介绍',
+              question: 'Could you tell me a little about yourself?',
+              translation: '请介绍一下你自己，重点说说与你申请岗位相关的经历。',
+              reference: state.intro,
               points: [
-                `项目背景：${project.background || '待补充'}`,
-                `个人职责：${project.role || '待补充'}`,
-                `技术选择：${project.decision || '待补充'}`,
-                `真实结果：${project.result || '待补充，不可编造'}`,
-                `反思与改进：${project.reflection || '待补充'}`,
+                '说明当前专业方向',
+                '介绍一项与岗位相关的真实经历',
+                '区分个人贡献和团队成果',
+                '简洁说明下一步发展方向',
               ],
-              followups: [
-                'What alternatives did you consider, and how did you evaluate them?',
-                'What would you do differently next time?',
-              ],
+              followups: ['What part of your recent work are you most proud of?'],
             }
-          : target === 'reverse'
+          : project
             ? {
-                title: '反问面试官',
-                question: 'What would you like to know about this role or our team?',
-                translation: '你希望进一步了解这个岗位或团队的哪些方面？',
-                reference:
-                  'What would success look like in the first three months of this role?\nWhat are the main technical challenges the team is working on?',
+                title: project.name,
+                question:
+                  'Walk me through a project you worked on. What was your contribution, and why did you choose that approach?',
+                translation: '介绍一个你做过的项目，解释你的个人贡献与方案选择。',
+                reference: '',
                 points: [
-                  '结合岗位提出具体问题',
-                  '问题适合当前面试阶段',
-                  '避免假设公司的内部信息',
-                  '准备根据回答继续追问',
+                  `项目背景：${project.background || '待补充'}`,
+                  `个人职责：${project.role || '待补充'}`,
+                  `技术选择：${project.decision || '待补充'}`,
+                  `真实结果：${project.result || '待补充，不可编造'}`,
+                  `反思与改进：${project.reflection || '待补充'}`,
                 ],
-                followups: ['Why is that information important to you?'],
+                followups: [
+                  'What alternatives did you consider, and how did you evaluate them?',
+                  'What would you do differently next time?',
+                ],
               }
-            : target === 'clarify'
+            : target === 'reverse'
               ? {
-                  title: '澄清与恢复对话',
-                  question: 'How would you evaluate it?',
-                  translation: '信息不充分时，请先确认对方想问哪一种评估。',
+                  title: '反问面试官',
+                  question: 'What would you like to know about this role or our team?',
+                  translation: '你希望进一步了解这个岗位或团队的哪些方面？',
                   reference:
-                    'Could you clarify what you would like me to evaluate? Do you mean the offline model performance or the online business impact?',
-                  points: ['指出需要确认的范围', '礼貌提出具体澄清问题', '不在理解题意前猜测作答'],
-                  followups: ['I mean the online business impact. How would you measure it?'],
+                    'What would success look like in the first three months of this role?\nWhat are the main technical challenges the team is working on?',
+                  points: [
+                    '结合岗位提出具体问题',
+                    '问题适合当前面试阶段',
+                    '避免假设公司的内部信息',
+                    '准备根据回答继续追问',
+                  ],
+                  followups: ['Why is that information important to you?'],
                 }
-              : {
-                  title: q.title,
-                  question: q.question,
-                  translation: q.translation,
-                  reference: q.answer,
-                  points: q.points,
-                  followups: q.followups,
-                },
-    [isIntro, project, target, q, state.intro],
+              : target === 'clarify'
+                ? {
+                    title: '澄清与恢复对话',
+                    question: 'How would you evaluate it?',
+                    translation: '信息不充分时，请先确认对方想问哪一种评估。',
+                    reference:
+                      'Could you clarify what you would like me to evaluate? Do you mean the offline model performance or the online business impact?',
+                    points: [
+                      '指出需要确认的范围',
+                      '礼貌提出具体澄清问题',
+                      '不在理解题意前猜测作答',
+                    ],
+                    followups: ['I mean the online business impact. How would you measure it?'],
+                  }
+                : {
+                    title: q.title,
+                    question: q.question,
+                    translation: q.translation,
+                    reference: q.answer,
+                    points: q.points,
+                    followups: q.followups,
+                  },
+    [isIntro, project, target, q, state.intro, snapshot],
   );
   const [mode, setMode] = useState<Mode>(simulation ? 'independent' : initialMode),
     [showTranslation, setShowTranslation] = useState(!simulation),
@@ -164,7 +201,11 @@ export default function Practice({
     [assisted, setAssisted] = useState(initialMode !== 'independent' && !simulation),
     [answer, setAnswer] = useState(() => {
       try {
-        return sessionStorage.getItem('pal-draft:' + target) || '';
+        return (
+          sessionStorage.getItem(
+            'pal-draft:' + target + ':' + encodeURIComponent(context.question),
+          ) || ''
+        );
       } catch {
         return '';
       }
@@ -186,9 +227,31 @@ export default function Practice({
   const feedbackFor = useRef<{ answer: string; question: string; mode: Mode } | null>(null);
   const [preparingRecording, setPreparingRecording] = useState(false),
     [referenceDraft, setReferenceDraft] = useState('');
+  const [answerDraft, setAnswerDraft] = useState<{
+    text: string;
+    missingFacts: string[];
+    model: string;
+  } | null>(null);
+  const [draftConfirmed, setDraftConfirmed] = useState(false);
+  const [draftError, setDraftError] = useState('');
+  const [keepAudio, setKeepAudio] = useState(false);
+  const [savedWithAudio, setSavedWithAudio] = useState(false);
+  const [audioSaveFailure, setAudioSaveFailure] = useState<{
+    selfReview: boolean;
+    message: string;
+  } | null>(null);
+  const generation = useRef<{ sequence: number; controller?: AbortController }>({ sequence: 0 });
+  const savingAudio = useRef(false);
   const pendingAudioReplacement = useRef(false);
   const actualQuestion = followup || context.question;
-  const libraryQuestion = !isIntro && !project && target !== 'reverse' && target !== 'clarify';
+  const actualKind = followup ? 'followup' : baseKind;
+  const isFollowup = actualKind === 'followup';
+  const libraryQuestion = baseKind === 'technical';
+  const sourceUrl = snapshot ? snapshot.sourceUrl : libraryQuestion ? q.sourceUrl : undefined;
+  const category =
+    snapshot?.category ??
+    (isIntro ? 'intro' : project ? 'project' : baseKind === 'technical' ? q.category : baseKind);
+  const draftKey = 'pal-draft:' + target + ':' + encodeURIComponent(actualQuestion);
   const practiceReference = referenceDraft || (!followup ? context.reference : '');
   const sentences = practiceReference.split(/(?<=[.!?])\s+|\n+/).filter(Boolean);
   const currentSentence = sentences[sentence] ?? sentences[0] ?? '';
@@ -206,14 +269,25 @@ export default function Practice({
     alive.current = true;
     return () => {
       alive.current = false;
+      generation.current.sequence += 1;
+      generation.current.controller?.abort();
       window.speechSynthesis?.cancel();
     };
   }, []);
   useEffect(() => {
     try {
-      sessionStorage.setItem('pal-draft:' + target, answer);
+      sessionStorage.setItem(draftKey, answer);
     } catch {}
-  }, [answer, target]);
+  }, [answer, draftKey]);
+  useEffect(() => {
+    const protectAudioWrite = (event: BeforeUnloadEvent) => {
+      if (!savingAudio.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', protectAudioWrite);
+    return () => window.removeEventListener('beforeunload', protectAudioWrite);
+  }, []);
   useEffect(() => {
     if (recorder.recording && pendingAudioReplacement.current) {
       pendingAudioReplacement.current = false;
@@ -232,6 +306,9 @@ export default function Practice({
     setFeedback(null);
     feedbackFor.current = null;
     setSaved(false);
+    setKeepAudio(false);
+    setSavedWithAudio(false);
+    setAudioSaveFailure(null);
     setError('');
     started.current = Date.now();
   }
@@ -256,6 +333,8 @@ export default function Practice({
     window.speechSynthesis?.cancel();
     setSpeaking(false);
     setReferenceDraft(feedback.referenceAnswer);
+    setAnswerDraft(null);
+    setDraftConfirmed(false);
     setSentence(0);
     setMode('read');
     setAssisted(true);
@@ -266,6 +345,8 @@ export default function Practice({
     setSaved(false);
     recorder.setBlob(null);
     recorder.setSeconds(0);
+    setKeepAudio(false);
+    setAudioSaveFailure(null);
     started.current = Date.now();
     notify('参考表达已载入，先逐句跟读，再用关键词复述。');
   }
@@ -276,6 +357,111 @@ export default function Practice({
     setSentence(0);
     if (followup || !context.reference) setMode('keywords');
     setShowReference(false);
+  }
+  function cancelAnswerGeneration() {
+    generation.current.sequence += 1;
+    generation.current.controller?.abort();
+    generation.current.controller = undefined;
+    if (busy === 'answer') setBusy('');
+    setDraftError('已停止等待，本次结果不会载入。已提交的模型请求仍可能产生费用。');
+  }
+  async function generateAnswer() {
+    if (
+      simulation ||
+      (isIntro && !isFollowup) ||
+      !health?.configured ||
+      busy ||
+      recorder.recording ||
+      preparingRecording
+    )
+      return;
+    generation.current.controller?.abort();
+    const controller = new AbortController();
+    const sequence = ++generation.current.sequence;
+    generation.current.controller = controller;
+    const timer = setTimeout(() => controller.abort(), 65000);
+    const current = () => alive.current && generation.current.sequence === sequence;
+    setBusy('answer');
+    setDraftError('');
+    setDraftConfirmed(false);
+    try {
+      const response = await fetch('/api/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          kind: actualKind,
+          question: actualQuestion,
+          points: isFollowup ? [] : context.points,
+          referenceAnswer: isFollowup ? undefined : practiceReference || undefined,
+          project,
+          job,
+          facts: snapshot ? [] : state.profile.facts.filter((fact) => fact.confirmed).slice(0, 60),
+        }),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.error?.message || '参考稿生成失败，请稍后重试。');
+      if (typeof result?.text !== 'string' || !result.text.trim() || result.text.length > 8000)
+        throw new Error('模型没有返回可用参考稿，请重试。');
+      if (current()) {
+        setAnswerDraft({
+          text: result.text,
+          missingFacts: Array.isArray(result.missingFacts)
+            ? result.missingFacts
+                .filter((value: unknown): value is string => typeof value === 'string')
+                .slice(0, 8)
+            : [],
+          model: typeof result.model === 'string' ? result.model : '',
+        });
+        setAssisted(true);
+        setFeedback(null);
+        feedbackFor.current = null;
+        notify('参考稿已生成。先核对事实与技术内容，再开始跟读。');
+      }
+    } catch (reason) {
+      if (current())
+        setDraftError(
+          reason instanceof Error && reason.name === 'AbortError'
+            ? '生成等待超时。已有内容保留，可以重新生成。'
+            : errorMessage(reason),
+        );
+    } finally {
+      clearTimeout(timer);
+      if (current()) {
+        generation.current.controller = undefined;
+        setBusy('');
+      }
+    }
+  }
+  function confirmAnswerDraft() {
+    if (
+      !answerDraft?.text.trim() ||
+      !draftConfirmed ||
+      busy ||
+      recorder.recording ||
+      preparingRecording
+    )
+      return;
+    if (
+      ((answer.trim() && !saved) || recorder.blob) &&
+      !window.confirm(
+        '载入稿件将开始一轮新的跟读，清空当前未保存的文字与临时录音。已保存记录会保留，继续吗？',
+      )
+    )
+      return;
+    window.speechSynthesis?.cancel();
+    setSpeaking(false);
+    setReferenceDraft(answerDraft.text.trim());
+    setAnswerDraft(null);
+    setDraftConfirmed(false);
+    setSentence(0);
+    setMode('read');
+    setAssisted(true);
+    setShowReference(false);
+    clearAnswerForNewAudio();
+    recorder.setBlob(null);
+    recorder.setSeconds(0);
+    notify('参考稿已确认。跟读不会自动计为完成，录下或写出你的回答后再保存。');
   }
   function speak(text: string, rate = 1) {
     if (!('speechSynthesis' in window)) {
@@ -321,10 +507,10 @@ export default function Practice({
       setError('回答文字超过15,000字符，请先精简或拆分后再获取反馈。');
       return;
     }
-    const snapshot = { answer, question: actualQuestion, mode };
+    const evaluationSnapshot = { answer, question: actualQuestion, mode };
     const assessmentQuestion =
-      !followup && target === 'reverse' && state.plan.jd?.trim()
-        ? `${actualQuestion}\n\nTarget job description (user-provided context, not verified company facts):\n${state.plan.jd.slice(0, 3000)}`
+      !isFollowup && baseKind === 'reverse' && job?.jd.trim()
+        ? `${actualQuestion}\n\nTarget job description (user-provided context, not verified company facts):\n${job.jd.slice(0, 3000)}`
         : actualQuestion;
     setBusy('feedback');
     setError('');
@@ -332,13 +518,13 @@ export default function Practice({
     try {
       const r = await request<Feedback>('feedback', {
         question: assessmentQuestion,
-        answer: snapshot.answer,
-        points: followup ? [] : context.points,
+        answer: evaluationSnapshot.answer,
+        points: isFollowup ? [] : context.points,
         mode: assisted && mode === 'independent' ? 'keywords' : mode,
-        referenceAnswer: followup ? undefined : practiceReference || undefined,
+        referenceAnswer: isFollowup ? undefined : practiceReference || undefined,
       });
       if (alive.current) {
-        feedbackFor.current = snapshot;
+        feedbackFor.current = evaluationSnapshot;
         setFeedback(r);
         setSaved(false);
       }
@@ -370,7 +556,8 @@ export default function Practice({
       if (alive.current) setBusy('');
     }
   }
-  function save(selfReview = false) {
+  async function save(selfReview = false, textOnly = false) {
+    if (savingAudio.current || busy || preparingRecording || recorder.recording || saved) return;
     if (answer.length > 15000) {
       setError('回答文字超过15,000字符，请先精简或拆分后再保存。');
       return;
@@ -386,52 +573,95 @@ export default function Practice({
       setError('回答或练习模式已有变化，请重新获取反馈后保存。');
       return;
     }
-    if (!answer.trim()) {
-      setError('请先输入回答或完成录音转写，再保存练习。录音可以单独下载。');
+    const shouldSaveAudio = !textOnly && keepAudio && !!recorder.blob;
+    if (!answer.trim() && !(selfReview && shouldSaveAudio)) {
+      setError('请填写回答，或勾选保存当前录音后保存自主练习。仅保存文字时需要先有文字回答。');
       return;
     }
     const id = uid();
-    update((s) => ({
-      ...s,
-      attempts: [
-        {
-          id,
-          questionId: target,
-          question: actualQuestion,
-          title: followup ? `${context.title} · 追问` : context.title,
-          category: isIntro ? 'intro' : project ? 'project' : q.category,
-          date: new Date().toISOString(),
-          answer,
-          mode,
-          feedback: selfReview ? undefined : (feedback ?? undefined),
-          duration: Math.min(1800, Math.round((Date.now() - started.current) / 1000)),
-          assisted: assisted || mode !== 'independent',
-          selfReview,
-          reviewDue: inDays(1),
-        },
-        ...s.attempts,
-      ],
-    }));
-    setSaved(true);
-    notify(
-      selfReview ? '已保存自主练习，明天再来复述一次。' : '反馈与回答已保存，已安排次日复习。',
-    );
+    const attempt: Attempt = {
+      id,
+      questionId: target,
+      question: actualQuestion,
+      title: followup ? `${context.title} · 追问` : context.title,
+      category,
+      date: new Date().toISOString(),
+      answer,
+      mode,
+      feedback: selfReview ? undefined : (feedback ?? undefined),
+      duration: Math.min(1800, Math.round((Date.now() - started.current) / 1000)),
+      assisted: assisted || mode !== 'independent',
+      selfReview,
+      reviewDue: inDays(1),
+      snapshot: {
+        kind: actualKind,
+        question: actualQuestion,
+        title: followup ? `${context.title} · 追问` : context.title,
+        category,
+        translation: followup ? undefined : context.translation || undefined,
+        points: isFollowup ? [] : [...context.points],
+        reference: practiceReference || undefined,
+        sourceUrl,
+        project: project ? structuredClone(project) : undefined,
+        job: job ? { ...job } : undefined,
+      },
+    };
+    let attachment: AudioAttachment | undefined;
+    savingAudio.current = true;
+    setBusy('saving');
+    setError('');
+    setAudioSaveFailure(null);
+    window.dispatchEvent(new CustomEvent('interview-pal:busy', { detail: { busy: true } }));
     try {
-      sessionStorage.removeItem('pal-draft:' + target);
-    } catch {}
+      if (shouldSaveAudio && recorder.blob)
+        attachment = await saveAudio(id, recorder.blob, audioFileName(recorder.blob));
+      if (!alive.current) {
+        if (attachment) await deleteAudio(attachment.key).catch(() => {});
+        return;
+      }
+      update((s) => ({ ...s, attempts: [{ ...attempt, audio: attachment }, ...s.attempts] }));
+      setSaved(true);
+      setSavedWithAudio(!!attachment);
+      notify(
+        attachment
+          ? answer.trim()
+            ? '回答与录音已保存，可在练习记录回放。'
+            : '录音已保存为自主练习，未生成转写或评分。'
+          : textOnly
+            ? '仅文字记录已保存，录音尚未保存；仍可在本页下载。'
+            : selfReview
+              ? '已保存自主练习，明天再来复述一次。'
+              : '反馈与回答已保存，已安排次日复习。',
+      );
+      try {
+        sessionStorage.removeItem(draftKey);
+      } catch {}
+    } catch (reason) {
+      if (alive.current)
+        setAudioSaveFailure({
+          selfReview,
+          message: `录音未能保存，本次练习记录也尚未写入。${errorMessage(reason)} 当前录音仍保留在本页。`,
+        });
+    } finally {
+      savingAudio.current = false;
+      window.dispatchEvent(new CustomEvent('interview-pal:busy', { detail: { busy: false } }));
+      if (alive.current) setBusy('');
+    }
   }
   async function askFollowup() {
     setBusy('followup');
     setError('');
     try {
       const contextText = [
-        context.points.join('\n'),
-        target === 'reverse' && state.plan.jd
-          ? `Target job description (user-provided):\n${state.plan.jd}`
+        !isFollowup ? context.points.join('\n') : '',
+        isFollowup && project
+          ? `User-provided project facts (not an answer rubric):\n${JSON.stringify(project)}`
           : '',
+        job?.jd ? `Target job description (user-provided):\n${job.jd}` : '',
       ]
         .filter(Boolean)
-        .join('\n\n');
+        .join('\n\n')
+        .slice(0, 20000);
       const r = await request<{ question: string }>('followup', {
         question: actualQuestion,
         answer,
@@ -439,6 +669,11 @@ export default function Practice({
       });
       if (alive.current) {
         setFollowup(r.question);
+        setAnswerDraft(null);
+        setDraftConfirmed(false);
+        setDraftError('');
+        setKeepAudio(false);
+        setAudioSaveFailure(null);
         setReferenceDraft('');
         setSentence(0);
         setFeedback(null);
@@ -458,7 +693,11 @@ export default function Practice({
       if (alive.current) setBusy('');
     }
   }
-  const needsConfirmation = isIntro && (!state.introConfirmed || state.introStale || !state.intro);
+  const needsConfirmation =
+    isIntro &&
+    !snapshot &&
+    !isFollowup &&
+    (!state.introConfirmed || state.introStale || !state.intro);
   return (
     <div className="practice-page">
       <div className="practice-breadcrumb">
@@ -529,14 +768,16 @@ export default function Practice({
           </div>
           <div className="practice-privacy">
             <ShieldCheck size={15} />
-            <span>录音暂存本页。只有点击转写，才发送给你配置的语音服务。</span>
+            <span>
+              录音默认暂存本页，可自主选择保存到此浏览器。只有点击转写，才发送给你配置的语音服务。
+            </span>
           </div>
         </aside>
         <main className="practice-main">
           <div className="question-prompt">
             <div className="row-between">
               <span className="eyebrow">
-                {followup ? 'FOLLOW-UP QUESTION' : 'THE INTERVIEWER ASKS'}
+                {isFollowup ? 'FOLLOW-UP QUESTION' : 'THE INTERVIEWER ASKS'}
               </span>
               <button
                 className="icon-button"
@@ -552,22 +793,150 @@ export default function Practice({
               {showTranslation ? <EyeOff size={14} /> : <Eye size={14} />}{' '}
               {showTranslation ? '隐藏中文提示' : '查看中文提示'}
             </button>
-            {libraryQuestion && q.sourceUrl && (
-              <p className="small muted">
-                <a className="text-button" href={q.sourceUrl} target="_blank" rel="noreferrer">
-                  {followup ? '原题参考出处' : '题目参考出处'} <ArrowRight size={13} />
-                </a>
-                {!q.reviewed && <span> · 内容待专家审核</span>}
+            {snapshot && (
+              <p className="inline-info">
+                <Info size={15} />
+                按历史题目和可用上下文重练，不会混入当前简历的新经历。
               </p>
             )}
-            {target === 'reverse' && state.plan.jd && (
+            {sourceUrl && (
+              <p className="small muted">
+                <a className="text-button" href={sourceUrl} target="_blank" rel="noreferrer">
+                  {isFollowup ? '原题参考出处' : '题目参考出处'} <ArrowRight size={13} />
+                </a>
+                {!snapshot && !q.reviewed && <span> · 内容待专家审核</span>}
+              </p>
+            )}
+            {baseKind === 'reverse' && job?.jd && (
               <details className="small muted">
                 <summary>查看你提供的岗位描述</summary>
-                <p style={{ whiteSpace: 'pre-wrap' }}>{state.plan.jd}</p>
+                <p style={{ whiteSpace: 'pre-wrap' }}>{job.jd}</p>
                 <p>根据这些岗位信息组织问题，不假设公司的真实内部情况。</p>
               </details>
             )}
           </div>
+          {!simulation && (!isIntro || isFollowup) && (
+            <section className="card intro-editor stack">
+              <div className="card-header">
+                <div>
+                  <div className="eyebrow">FIND YOUR WORDS</div>
+                  <h2>知道意思，却不知道英语怎么说？</h2>
+                  <p>可以先生成参考稿，核对并改成你的表达，再逐句练习。生成稿件不计为完成练习。</p>
+                </div>
+              </div>
+              <div className="action-row">
+                <button
+                  className="btn btn-secondary"
+                  disabled={
+                    !health?.configured || !!busy || preparingRecording || recorder.recording
+                  }
+                  onClick={generateAnswer}
+                >
+                  {busy === 'answer' ? (
+                    <LoaderCircle size={16} className="spin" />
+                  ) : (
+                    <Sparkles size={16} />
+                  )}
+                  {answerDraft ? '重新生成参考稿' : '生成英文参考稿'}
+                </button>
+                {busy === 'answer' && (
+                  <button className="btn btn-ghost" onClick={cancelAnswerGeneration}>
+                    取消等待
+                  </button>
+                )}
+              </div>
+              {!health?.configured && (
+                <p className="inline-info">
+                  <Info size={15} />
+                  AI 教练尚未配置，暂时无法生成参考稿。你仍可自行回答，或使用已有题目参考表达。
+                </p>
+              )}
+              {draftError && (
+                <p className="error-message" role="alert">
+                  {draftError}
+                </p>
+              )}
+              {answerDraft && (
+                <>
+                  {!!answerDraft.missingFacts.length && (
+                    <div className="inline-info">
+                      <div>
+                        <strong>这些信息仍需要你补充或核实</strong>
+                        <ul>
+                          {answerDraft.missingFacts.map((fact, index) => (
+                            <li key={index}>{fact}</li>
+                          ))}
+                        </ul>
+                        <p>不知道的内容可以删除或诚实说明。不要把建议方案写成已经完成的经历。</p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="field">
+                    <label htmlFor="generated-answer-draft">英文参考稿 · 可编辑</label>
+                    <textarea
+                      id="generated-answer-draft"
+                      className="textarea english"
+                      rows={9}
+                      maxLength={8000}
+                      value={answerDraft.text}
+                      disabled={!!busy || recorder.recording || preparingRecording}
+                      onChange={(event) => {
+                        setAnswerDraft({ ...answerDraft, text: event.target.value });
+                        setDraftConfirmed(false);
+                      }}
+                    />
+                    <span className="small muted">
+                      {answerDraft.text.length.toLocaleString()} / 8,000 ·{' '}
+                      {answerDraft.model ? `模型：${answerDraft.model}` : 'AI 生成内容'} ·
+                      不会自动覆盖你的回答。
+                    </span>
+                  </div>
+                  <label className="fact-row" htmlFor="confirm-generated-answer">
+                    <input
+                      id="confirm-generated-answer"
+                      type="checkbox"
+                      checked={draftConfirmed}
+                      disabled={!!busy || recorder.recording || preparingRecording}
+                      onChange={(event) => setDraftConfirmed(event.target.checked)}
+                    />
+                    <span>
+                      我已核对技术内容和个人事实，并处理缺失信息；稿件没有虚构职责、指标或成果。
+                    </span>
+                  </label>
+                  <div className="action-row">
+                    <button
+                      className="btn btn-primary"
+                      disabled={
+                        !draftConfirmed ||
+                        !answerDraft.text.trim() ||
+                        !!busy ||
+                        preparingRecording ||
+                        recorder.recording
+                      }
+                      onClick={confirmAnswerDraft}
+                    >
+                      <Headphones size={16} />
+                      确认稿件，开始逐句跟读
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setAnswerDraft(null);
+                        setDraftConfirmed(false);
+                        setDraftError('');
+                      }}
+                    >
+                      放弃这份草稿
+                    </button>
+                  </div>
+                  <p className="small muted">
+                    查看参考稿会记为使用辅助。请再通过新追问和延迟复习检验独立表达。
+                  </p>
+                </>
+              )}
+            </section>
+          )}
           {needsConfirmation && !simulation && (
             <section className="card intro-editor">
               <div className="card-header">
@@ -709,7 +1078,7 @@ export default function Practice({
             <div className="keyword-card">
               <div className="eyebrow">YOUR TALKING POINTS</div>
               <div className="keyword-list">
-                {(followup
+                {(isFollowup
                   ? ['先直接回应这道追问', '补充真实依据、限制或取舍']
                   : context.points
                 ).map((point, i) => (
@@ -728,8 +1097,8 @@ export default function Practice({
                 <p>
                   {mode === 'read'
                     ? '录下这句话，回听自己的表达。'
-                    : project || target === 'reverse'
-                      ? '可以先用中文写清要点；获取反馈后核对英文参考，再带着它练习。'
+                    : project || baseKind === 'reverse'
+                      ? '可以先用中文写清要点，也可以在上方生成并核对英文稿，再带着它练习。'
                       : '先表达出来，再一起打磨。'}
                 </p>
               </div>
@@ -849,7 +1218,7 @@ export default function Practice({
                     <Upload size={14} />
                     上传已有录音
                   </button>
-                  <span>录音仅保留在当前页面，请及时下载</span>
+                  <span>录音默认仅保留在本页；下方可选择随练习保存。</span>
                 </div>
                 {!health?.asrConfigured && (
                   <p className="inline-info">
@@ -866,7 +1235,7 @@ export default function Practice({
                 <textarea
                   className="textarea english"
                   placeholder={
-                    project || target === 'reverse'
+                    project || baseKind === 'reverse'
                       ? '可以先用中文写出你的真实要点，也可以直接用英语回答。'
                       : 'Start with the key idea. Then explain your reasoning…'
                   }
@@ -902,6 +1271,66 @@ export default function Practice({
                 {error}
               </p>
             )}
+            {recorder.blob && (
+              <div className="stack">
+                <label className="fact-row" htmlFor="save-practice-audio">
+                  <input
+                    id="save-practice-audio"
+                    type="checkbox"
+                    checked={keepAudio}
+                    disabled={!!busy || preparingRecording || recorder.recording || saved}
+                    onChange={(event) => {
+                      setKeepAudio(event.target.checked);
+                      setAudioSaveFailure(null);
+                    }}
+                  />
+                  <span>把这次录音保存在此浏览器，之后可在练习记录中回放</span>
+                </label>
+                <p className="small muted">
+                  默认不保存录音。
+                  {keepAudio
+                    ? '勾选后，没有转写文字也能保存自主练习；这不会产生发音分数。'
+                    : '未保存的录音会在离开本页后清除，请先下载需要保留的内容。'}
+                </p>
+                {saved && (
+                  <p className="inline-info">
+                    <CheckCircle2 size={15} />
+                    {savedWithAudio
+                      ? '这次录音已经随练习保存。'
+                      : '本次仅保存了文字，录音未加入练习记录。'}
+                  </p>
+                )}
+              </div>
+            )}
+            {audioSaveFailure && (
+              <div className="stack">
+                <p className="error-message" role="alert">
+                  {audioSaveFailure.message}
+                </p>
+                <div className="action-row">
+                  <button
+                    className="btn btn-secondary"
+                    disabled={!!busy || preparingRecording || recorder.recording}
+                    onClick={() => void save(audioSaveFailure.selfReview)}
+                  >
+                    <RefreshCw size={15} />
+                    重试录音保存
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    disabled={!!busy || !answer.trim() || preparingRecording || recorder.recording}
+                    onClick={() => void save(audioSaveFailure.selfReview, true)}
+                  >
+                    仅保存文字
+                  </button>
+                </div>
+                {!answer.trim() && (
+                  <p className="small muted">
+                    当前没有文字回答，暂时无法仅保存文字；可以重试，或先下载录音。
+                  </p>
+                )}
+              </div>
+            )}
             <div className="response-actions">
               <button
                 className="btn btn-primary"
@@ -924,12 +1353,16 @@ export default function Practice({
               <button
                 className="btn btn-secondary"
                 disabled={
-                  !answer.trim() || saved || !!busy || preparingRecording || recorder.recording
+                  (!answer.trim() && !(keepAudio && recorder.blob)) ||
+                  saved ||
+                  !!busy ||
+                  preparingRecording ||
+                  recorder.recording
                 }
                 onClick={() => save(true)}
               >
                 <Save size={16} />
-                {saved ? '已保存' : '保存自主练习'}
+                {busy === 'saving' ? '正在保存…' : saved ? '已保存' : '保存自主练习'}
               </button>
             </div>
             <p className="footnote">

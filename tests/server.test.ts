@@ -52,6 +52,16 @@ const generatedFeedback = {
   followUp: 'How would you detect overfitting?',
   contentLevel: 'developing',
 };
+const draftRequest = {
+  kind: 'technical',
+  question: 'How do you evaluate a retrieval system?',
+  points: ['Representative queries', 'Offline and online evaluation'],
+};
+const generatedDraft = {
+  text: 'I would start with representative queries and assess relevance before checking business impact.',
+  missingFacts: [],
+  factIds: [],
+};
 
 const completion = (content: unknown, extra: Record<string, unknown> = {}): Response =>
   Response.json({
@@ -271,6 +281,280 @@ test('follow-up validates and returns the model-generated question', async () =>
       });
       assert.equal(response.status, 200);
       assert.match((await response.json()).question, /validate/);
+    },
+  );
+});
+
+test('answer drafting accepts all practice kinds without an existing answer', async () => {
+  await withApp(
+    { env: configured, fetchImpl: (async () => completion(generatedDraft)) as FetchImpl },
+    async (url) => {
+      for (const kind of ['technical', 'project', 'reverse', 'clarify', 'followup']) {
+        const response = await jsonPost(`${url}/api/answer`, { ...draftRequest, kind });
+        assert.equal(response.status, 200, kind);
+        const body = await response.json();
+        assert.equal(body.text, generatedDraft.text);
+        assert.equal(body.model, 'test-model-snapshot');
+        assert.deepEqual(body.factIds, []);
+        assert.equal(body.usage.total_tokens, 168);
+        if (kind === 'project') {
+          assert.equal(body.missingFacts.length, 6);
+          assert.ok(body.missingFacts.some((item: string) => item.includes('真实成果')));
+        }
+      }
+    },
+  );
+});
+
+test('answer drafting without credentials returns 503 without external requests', async () => {
+  let calls = 0;
+  await withApp(
+    {
+      env: {},
+      fetchImpl: (async () => {
+        calls++;
+        return completion(generatedDraft);
+      }) as FetchImpl,
+    },
+    async (url) => {
+      const response = await jsonPost(`${url}/api/answer`, draftRequest);
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).error.code, 'LLM_NOT_CONFIGURED');
+      assert.equal(calls, 0);
+    },
+  );
+});
+
+test('answer drafting filters unconfirmed facts and keeps job requirements separate from personal evidence', async () => {
+  const job = { role: 'Search engineer', jd: 'TARGET_JD: requires five years of experience.' };
+  const mock = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    const data = JSON.parse(body.messages[1].content);
+    assert.deepEqual(data.facts, [intro.profile.facts[0]]);
+    assert.deepEqual(data.job, job);
+    assert.equal(body.messages[1].content.includes('UNCONFIRMED_SENTINEL'), false);
+    assert.match(body.messages[0].content, /TARGET JOB, not the candidate/);
+    return completion({ ...generatedDraft, factIds: ['yes', 'yes'] });
+  }) as FetchImpl;
+  await withApp({ env: configured, fetchImpl: mock }, async (url) => {
+    const response = await jsonPost(`${url}/api/answer`, {
+      ...draftRequest,
+      job,
+      facts: intro.profile.facts,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).factIds, ['yes']);
+  });
+});
+
+test('answer drafting rejects invented, unconfirmed and project IDs rather than presenting fake provenance', async () => {
+  for (const factId of ['unknown', 'no', 'project-id']) {
+    await withApp(
+      {
+        env: configured,
+        fetchImpl: (async () => completion({ ...generatedDraft, factIds: [factId] })) as FetchImpl,
+      },
+      async (url) => {
+        const response = await jsonPost(`${url}/api/answer`, {
+          ...draftRequest,
+          facts: intro.profile.facts,
+          project: { id: 'project-id', name: 'Search evaluation' },
+        });
+        assert.equal(response.status, 502);
+        const body = await response.json();
+        assert.equal(body.error.code, 'MODEL_FACT_REFERENCE_INVALID');
+        assert.equal(body.text, undefined);
+      },
+    );
+  }
+  await withApp(
+    {
+      env: configured,
+      fetchImpl: (async () => completion({ ...generatedDraft, factIds: ['yes'] })) as FetchImpl,
+    },
+    async (url) => {
+      const response = await jsonPost(`${url}/api/answer`, { ...draftRequest, facts: [] });
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).error.code, 'MODEL_FACT_REFERENCE_INVALID');
+    },
+  );
+});
+
+test('empty project produces explicit missing facts, even if the model omits them', async () => {
+  const template = {
+    ...generatedDraft,
+    text: 'Template: In [fill in project name], I was responsible for [fill in your role].',
+  };
+  await withApp(
+    { env: configured, fetchImpl: (async () => completion(template)) as FetchImpl },
+    async (url) => {
+      const response = await jsonPost(`${url}/api/answer`, {
+        ...draftRequest,
+        kind: 'project',
+        project: {},
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.match(body.text, /\[fill in your role\]/);
+      assert.equal(body.missingFacts.length, 6);
+      assert.deepEqual(body.factIds, []);
+    },
+  );
+});
+
+test('personal project numbers require project or confirmed fact evidence, never JD, examples or unconfirmed facts', async () => {
+  const cases = [
+    { input: { job: { jd: 'Improve CTR by 24%.' } }, status: 502 },
+    { input: { referenceAnswer: 'I improved CTR by 24%.' }, status: 502 },
+    { input: { points: ['Say you improved CTR by 24%.'] }, status: 502 },
+    {
+      input: { facts: [{ id: 'f1', text: 'Improved CTR by 24%.', confirmed: false }] },
+      status: 502,
+    },
+    {
+      input: { facts: [{ id: 'f1', text: 'Improved CTR by 24%.', confirmed: true }] },
+      status: 200,
+    },
+    { input: { project: { result: 'CTR improved by 24% in an experiment.' } }, status: 200 },
+    { input: { project: { result: '实验中点击率提升２４％。' } }, status: 200 },
+  ];
+  await withApp(
+    {
+      env: configured,
+      fetchImpl: (async () =>
+        completion({ ...generatedDraft, text: 'I improved CTR by 24%.' })) as FetchImpl,
+    },
+    async (url) => {
+      for (const item of cases) {
+        const response = await jsonPost(`${url}/api/answer`, {
+          ...draftRequest,
+          kind: 'project',
+          ...item.input,
+        });
+        assert.equal(response.status, item.status);
+        if (item.status === 502)
+          assert.equal((await response.json()).error.code, 'MODEL_FACTS_UNSUPPORTED');
+      }
+    },
+  );
+});
+
+test('answer input rejects unknown fields, duplicate fact IDs and over-limit fields before billing', async () => {
+  let calls = 0;
+  const invalid = [
+    { kind: 'invented' },
+    { question: 'q'.repeat(4001) },
+    { answer: 'Not part of this contract.' },
+    { baseUrl: 'https://attacker.test' },
+    { points: Array(31).fill('point') },
+    { points: ['p'.repeat(2001)] },
+    { referenceAnswer: 'x'.repeat(20001) },
+    { project: { name: 'x'.repeat(81) } },
+    ...['background', 'role', 'decision', 'result', 'reflection'].map((field) => ({
+      project: { [field]: 'x'.repeat(1601) },
+    })),
+    { project: { id: 'x'.repeat(1001) } },
+    { project: { tags: Array(9).fill('tag') } },
+    { project: { tags: ['x'.repeat(31)] } },
+    { job: { role: 'x'.repeat(101) } },
+    { job: { jd: 'x'.repeat(12001) } },
+    {
+      facts: Array.from({ length: 61 }, (_, i) => ({
+        id: `f${i}`,
+        text: 'Confirmed',
+        confirmed: true,
+      })),
+    },
+    { facts: [{ id: 'f', text: 'x'.repeat(801), confirmed: true }] },
+    { facts: [{ id: 'x'.repeat(101), text: 'Confirmed', confirmed: true }] },
+    {
+      facts: [
+        { id: 'same', text: 'First', confirmed: true },
+        { id: 'same', text: 'Second', confirmed: false },
+      ],
+    },
+  ];
+  await withApp(
+    {
+      env: configured,
+      fetchImpl: (async () => {
+        calls++;
+        return completion(generatedDraft);
+      }) as FetchImpl,
+    },
+    async (url) => {
+      for (const value of invalid) {
+        const response = await jsonPost(`${url}/api/answer`, { ...draftRequest, ...value });
+        assert.equal(response.status, 400);
+        assert.equal((await response.json()).error.code, 'INVALID_INPUT');
+      }
+      assert.equal(calls, 0);
+    },
+  );
+});
+
+test('answer input accepts frontend project limits, 12k Chinese JD and all 60 confirmed facts', async () => {
+  const project = {
+    id: 'p'.repeat(1000),
+    name: '项'.repeat(80),
+    background: '背'.repeat(1600),
+    role: '责'.repeat(1600),
+    decision: '方'.repeat(1600),
+    result: '果'.repeat(1600),
+    reflection: '思'.repeat(1600),
+    tags: Array(8).fill('算'.repeat(30)),
+  };
+  const job = { role: '角'.repeat(100), jd: '岗'.repeat(12000) };
+  const facts = Array.from({ length: 60 }, (_, i) => ({
+    id: `f${i}`,
+    text: '实'.repeat(800),
+    confirmed: true,
+  }));
+  await withApp(
+    {
+      env: configured,
+      fetchImpl: (async (_url, init) => {
+        const data = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
+        assert.deepEqual(data.project, project);
+        assert.deepEqual(data.job, job);
+        assert.equal(data.facts.length, 60);
+        return completion(generatedDraft);
+      }) as FetchImpl,
+    },
+    async (url) => {
+      const response = await jsonPost(`${url}/api/answer`, {
+        ...draftRequest,
+        kind: 'project',
+        project,
+        job,
+        facts,
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).missingFacts, []);
+    },
+  );
+});
+
+test('answer output validates its full structured contract and rejects model overflow', async () => {
+  const invalidOutputs = [
+    { text: 'x' },
+    { ...generatedDraft, score: 80 },
+    { ...generatedDraft, text: 'x'.repeat(8001) },
+    { ...generatedDraft, missingFacts: Array(9).fill('Missing fact') },
+    { ...generatedDraft, missingFacts: ['x'.repeat(301)] },
+    { ...generatedDraft, factIds: Array(61).fill('f') },
+  ];
+  let index = 0;
+  await withApp(
+    { env: configured, fetchImpl: (async () => completion(invalidOutputs[index++])) as FetchImpl },
+    async (url) => {
+      for (const _output of invalidOutputs) {
+        const response = await jsonPost(`${url}/api/answer`, draftRequest);
+        assert.equal(response.status, 502);
+        const body = await response.json();
+        assert.equal(body.error.code, 'MODEL_OUTPUT_INVALID');
+        assert.equal(body.text, undefined);
+      }
     },
   );
 });

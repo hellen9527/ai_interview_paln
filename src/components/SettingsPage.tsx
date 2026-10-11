@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowUpRight,
   CheckCircle2,
@@ -18,6 +18,14 @@ import {
 } from 'lucide-react';
 import type { PageProps } from '../types';
 import { downloadFile, emptyState, parseState, STORAGE_KEY } from '../lib/store';
+import {
+  clearAudio,
+  getAudioUsage,
+  listAudioMetadata,
+  pruneAudio,
+  MAX_TOTAL_AUDIO_BYTES,
+} from '../lib/audioStore';
+import { Progress } from './UI';
 export default function SettingsPage({
   state,
   update,
@@ -27,24 +35,137 @@ export default function SettingsPage({
 }: PageProps & { recheck: () => Promise<void> }) {
   const input = useRef<HTMLInputElement>(null),
     [checking, setChecking] = useState(false),
-    [importError, setImportError] = useState('');
-  async function importData(file: File) {
-    setImportError('');
+    [importError, setImportError] = useState(''),
+    [audioUsage, setAudioUsage] = useState<{ bytes: number; count: number } | null>(null),
+    [audioError, setAudioError] = useState(''),
+    [dataBusy, setDataBusy] = useState(false);
+  async function refreshAudioUsage() {
     try {
-      if (file.size > 10 * 1024 * 1024) throw new Error('备份文件请控制在 10MB 以内。');
-      const next = parseState(await file.text());
-      if (
-        !window.confirm(
-          `将恢复 ${next.attempts.length} 条练习记录，覆盖当前档案和计划。请先导出当前数据，确定继续吗？`,
-        )
-      )
-        return;
-      update(next);
-      notify('备份已恢复。');
+      setAudioUsage(await getAudioUsage());
+      setAudioError('');
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : '本机录音库暂不可用。');
+    }
+  }
+  useEffect(() => {
+    void refreshAudioUsage();
+  }, []);
+  async function importData(file: File) {
+    if (dataBusy) return;
+    setImportError('');
+    let next;
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error();
+      next = parseState(await file.text());
     } catch {
       setImportError('无法导入：请使用本应用导出的 v1 JSON 备份，文件不能超过 10MB。');
-    } finally {
       if (input.current) input.current.value = '';
+      return;
+    }
+    if (
+      !window.confirm(
+        `将恢复 ${next.attempts.length} 条练习记录，覆盖当前文字资料。JSON不包含音频，本机已有录音会保留；不在本机的录音引用将移除。请先导出当前数据，继续吗？`,
+      )
+    ) {
+      if (input.current) input.current.value = '';
+      return;
+    }
+    setDataBusy(true);
+    try {
+      let missing = 0;
+      if (next.attempts.some((a) => a.audio)) {
+        const recordings = new Map((await listAudioMetadata()).map((a) => [a.key, a]));
+        next.attempts = next.attempts.map((attempt) => {
+          if (!attempt.audio) return attempt;
+          const stored = recordings.get(attempt.audio.key);
+          if (
+            stored &&
+            stored.bytes === attempt.audio.bytes &&
+            stored.mimeType === attempt.audio.mimeType
+          )
+            return attempt;
+          missing++;
+          return { ...attempt, audio: undefined };
+        });
+      }
+      update(next);
+      notify(
+        missing
+          ? `文字备份已恢复，${missing} 条录音不在本机，未恢复音频。`
+          : '文字备份已恢复。本机已有录音未被删除。',
+      );
+      await refreshAudioUsage();
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : '无法核对本机录音，备份尚未恢复，请稍后重试。',
+      );
+    } finally {
+      setDataBusy(false);
+      if (input.current) input.current.value = '';
+    }
+  }
+  async function removeAudio(kind: 'all' | 'unlinked') {
+    if (dataBusy) return;
+    if (
+      !window.confirm(
+        kind === 'all'
+          ? '删除此浏览器全部已保存录音？文字和反馈会保留。删除无法撤销，请先下载需要的录音。'
+          : '删除没有关联当前练习记录的录音？这可能包含旧备份关联的文件，删除后无法通过旧JSON恢复。',
+      )
+    )
+      return;
+    setDataBusy(true);
+    try {
+      if (kind === 'all') {
+        await clearAudio();
+        update((s) => ({ ...s, attempts: s.attempts.map((a) => ({ ...a, audio: undefined })) }));
+        notify('本机录音已清空，文字和反馈已保留。');
+      } else {
+        const count = await pruneAudio(
+          state.attempts.flatMap((a) => (a.audio ? [a.audio.key] : [])),
+        );
+        notify(`已清理 ${count} 条未关联录音。`);
+      }
+      await refreshAudioUsage();
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : '清理未完成，请重试。');
+    } finally {
+      setDataBusy(false);
+    }
+  }
+  async function removeEverything() {
+    if (
+      dataBusy ||
+      !window.confirm(
+        '确定清除全部本地训练资料、记录、录音和会话草稿？此操作无法撤销，请先导出文字并下载需要的录音。',
+      )
+    )
+      return;
+    setDataBusy(true);
+    try {
+      if (typeof indexedDB !== 'undefined') await clearAudio();
+      else if (state.attempts.some((a) => a.audio))
+        throw new Error('无法访问录音库，尚未清除数据，请从浏览器设置清除此站点数据。');
+      try {
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key?.startsWith('pal-draft:')) sessionStorage.removeItem(key);
+        }
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        update((s) => ({ ...s, attempts: s.attempts.map((a) => ({ ...a, audio: undefined })) }));
+        throw new Error(
+          '本机录音已清除，但浏览器拒绝清除文字存储。请从浏览器设置清除此站点的数据。',
+        );
+      }
+      update(emptyState());
+      setAudioUsage({ bytes: 0, count: 0 });
+      setAudioError('');
+      notify('本地训练资料、记录和录音已清除。');
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : '清除未完成，请重试。');
+    } finally {
+      setDataBusy(false);
     }
   }
   return (
@@ -55,7 +176,7 @@ export default function SettingsPage({
           <h1 className="page-title">安心练习，自己掌控。</h1>
           <p className="page-description">管理服务连接、个人资料和你的每一份练习记录。</p>
         </div>
-        <span className="badge">v0.1 · 本地训练版</span>
+        <span className="badge">v0.2 · 本地训练版</span>
       </div>
       <div className="settings-layout">
         <div className="stack">
@@ -167,8 +288,11 @@ export default function SettingsPage({
             </div>
             <div className="data-action">
               <div>
-                <h3>导出完整备份</h3>
-                <p>包含档案、计划、回答和反馈。不包含录音与 API Key。</p>
+                <h3>导出文字备份</h3>
+                <p>
+                  包含档案、计划、回答、问题快照和反馈。不包含音频文件与 API
+                  Key；录音请在复盘中单独下载。
+                </p>
               </div>
               <button
                 className="btn btn-secondary"
@@ -184,7 +308,7 @@ export default function SettingsPage({
             <div className="data-action">
               <div>
                 <h3>从备份恢复</h3>
-                <p>导入后会替换当前浏览器中的数据。</p>
+                <p>导入后替换文字资料。本机录音保留；其他设备的录音无法通过 JSON 恢复。</p>
               </div>
               <input
                 type="file"
@@ -196,7 +320,11 @@ export default function SettingsPage({
                   if (f) void importData(f);
                 }}
               />
-              <button className="btn btn-secondary" onClick={() => input.current?.click()}>
+              <button
+                className="btn btn-secondary"
+                disabled={dataBusy}
+                onClick={() => input.current?.click()}
+              >
                 <Upload size={16} />
                 导入备份
               </button>
@@ -206,26 +334,72 @@ export default function SettingsPage({
                 {importError}
               </p>
             )}
+            <div className="local-audio-card">
+              <div className="card-header">
+                <div>
+                  <h3>本机录音空间</h3>
+                  <p>只有练习时主动勾选，录音才会保留。不会上传云端。</p>
+                </div>
+                <button
+                  className="icon-button"
+                  aria-label="刷新录音空间"
+                  disabled={dataBusy}
+                  onClick={() => void refreshAudioUsage()}
+                >
+                  <RefreshCw size={16} />
+                </button>
+              </div>
+              {audioUsage ? (
+                <>
+                  <div className="audio-storage-numbers">
+                    <strong>
+                      {(audioUsage.bytes / 1024 / 1024).toFixed(1)} <small>/ 100 MB</small>
+                    </strong>
+                    <span>{audioUsage.count} 条录音</span>
+                  </div>
+                  <Progress
+                    value={(audioUsage.bytes / MAX_TOTAL_AUDIO_BYTES) * 100}
+                    label="录音空间使用率"
+                  />
+                </>
+              ) : (
+                !audioError && <p className="small muted">正在读取录音空间…</p>
+              )}
+              <p className="small muted">
+                单条最多10MB，总额100MB；浏览器可用空间可能更少。清理站点数据或更换浏览器会使录音丢失，请另行下载重要文件。
+              </p>
+              <div className="action-row">
+                <button
+                  className="btn btn-secondary btn-sm"
+                  disabled={dataBusy || audioUsage?.count === 0}
+                  onClick={() => void removeAudio('unlinked')}
+                >
+                  清理未关联录音
+                </button>
+                <button
+                  className="btn btn-ghost danger btn-sm"
+                  disabled={dataBusy || audioUsage?.count === 0}
+                  onClick={() => void removeAudio('all')}
+                >
+                  <Trash2 size={14} />
+                  清空录音
+                </button>
+              </div>
+              {audioError && (
+                <p className="error-message" role="alert">
+                  {audioError}
+                </p>
+              )}
+            </div>
             <div className="data-action danger-zone">
               <div>
                 <h3>清除这个浏览器的训练数据</h3>
-                <p>删除档案、计划、练习与会话草稿。建议先导出备份。</p>
+                <p>删除档案、计划、练习、全部本机录音与会话草稿。建议先备份。</p>
               </div>
               <button
                 className="btn btn-danger"
-                onClick={() => {
-                  if (!window.confirm('确定清除全部本地训练数据？此操作无法撤销，请先导出备份。'))
-                    return;
-                  try {
-                    for (let i = sessionStorage.length - 1; i >= 0; i--) {
-                      const key = sessionStorage.key(i);
-                      if (key?.startsWith('pal-draft:')) sessionStorage.removeItem(key);
-                    }
-                    localStorage.removeItem(STORAGE_KEY);
-                  } catch {}
-                  update(emptyState());
-                  notify('本地训练数据已清除。');
-                }}
+                disabled={dataBusy}
+                onClick={() => void removeEverything()}
               >
                 <Trash2 size={16} />
                 清除数据
@@ -253,7 +427,9 @@ export default function SettingsPage({
             </div>
             <div className="privacy-item">
               <CheckCircle2 size={17} />
-              <p>点击转写前，录音停留在当前页面；离开页面会清除，请及时下载。</p>
+              <p>
+                未勾选保存的录音离开页面后清除；主动保存的录音留在此浏览器，可在复盘回听或删除。只有点击转写才发送给语音服务。
+              </p>
             </div>
             <div className="privacy-item">
               <CheckCircle2 size={17} />

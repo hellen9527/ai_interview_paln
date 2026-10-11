@@ -75,10 +75,30 @@ export interface Feedback {
   contentLevel: 'strong' | 'developing' | 'needs-work';
   model: string;
 }
+export interface PracticeSnapshot {
+  kind: 'intro' | 'technical' | 'project' | 'reverse' | 'clarify' | 'followup';
+  question: string;
+  title: string;
+  category: string;
+  translation?: string;
+  points: string[];
+  reference?: string;
+  sourceUrl?: string;
+  project?: Project;
+  job?: { role: string; jd: string };
+}
+export interface AudioAttachment {
+  key: string;
+  bytes: number;
+  mimeType: string;
+  fileName: string;
+}
 export interface Attempt {
   id: string;
   questionId: string;
   question?: string;
+  snapshot?: PracticeSnapshot;
+  audio?: AudioAttachment;
   title: string;
   category: string;
   date: string;
@@ -123,4 +143,5 @@ export interface PageProps {
   notify: (message: string) => void;
   startPractice: (id: string, mode?: Mode, simulation?: boolean) => void;
   health: Health | null;
+  repeatAttempt?: (attempt: Attempt) => void;
 }

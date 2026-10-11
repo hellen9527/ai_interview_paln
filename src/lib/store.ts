@@ -91,6 +91,42 @@ const feedback = z.object({
   contentLevel: z.enum(['strong', 'developing', 'needs-work']),
   model: short,
 });
+const projectSchema = z.object({
+  id: short,
+  name: z.string().max(80),
+  background: z.string().max(1600),
+  role: z.string().max(1600),
+  decision: z.string().max(1600),
+  result: z.string().max(1600),
+  reflection: z.string().max(1600),
+  tags: z.array(z.string().max(30)).max(8),
+});
+const snapshotSchema = z.object({
+  kind: z.enum(['intro', 'technical', 'project', 'reverse', 'clarify', 'followup']),
+  question: z.string().min(1).max(4000),
+  title: short,
+  category: short,
+  translation: z.string().max(4000).optional(),
+  points: z.array(z.string().max(2000)).max(30),
+  reference: z.string().max(20000).optional(),
+  sourceUrl: z
+    .string()
+    .url()
+    .refine((value) => /^https?:\/\//.test(value))
+    .optional(),
+  project: projectSchema.optional(),
+  job: z.object({ role: z.string().max(100), jd: z.string().max(12000) }).optional(),
+});
+const audioSchema = z.object({
+  key: z.string().min(1).max(1000),
+  bytes: z
+    .number()
+    .int()
+    .positive()
+    .max(10 * 1024 * 1024),
+  mimeType: z.string().max(200),
+  fileName: z.string().min(1).max(180),
+});
 export const stateSchema = z.object({
   version: z.literal(1),
   sample: z.boolean(),
@@ -138,23 +174,35 @@ export const stateSchema = z.object({
   bookmarks: z.array(short).max(1000),
   attempts: z
     .array(
-      z.object({
-        id: short,
-        questionId: short,
-        question: text.optional(),
-        title: short,
-        category: short,
-        date: z.iso.datetime(),
-        answer: z.string().max(15000),
-        mode: z.enum(['read', 'keywords', 'independent']),
-        feedback: feedback.optional(),
-        duration: z.number().min(0).max(1800),
-        assisted: z.boolean(),
-        selfReview: z.boolean().optional(),
-        reviewDue: z.iso.datetime(),
-      }),
+      z
+        .object({
+          id: short,
+          questionId: short,
+          question: text.optional(),
+          snapshot: snapshotSchema.optional(),
+          audio: audioSchema.optional(),
+          title: short,
+          category: short,
+          date: z.iso.datetime(),
+          answer: z.string().max(15000),
+          mode: z.enum(['read', 'keywords', 'independent']),
+          feedback: feedback.optional(),
+          duration: z.number().min(0).max(1800),
+          assisted: z.boolean(),
+          selfReview: z.boolean().optional(),
+          reviewDue: z.iso.datetime(),
+        })
+        .refine((a) => !a.audio || a.audio.key === a.id, '录音引用必须属于这条练习记录。')
+        .refine(
+          (a) => !a.snapshot || !a.question || a.snapshot.question === a.question,
+          '题目快照与记录不一致。',
+        ),
     )
-    .max(5000),
+    .max(5000)
+    .refine(
+      (attempts) => new Set(attempts.map((a) => a.id)).size === attempts.length,
+      '练习记录ID不能重复。',
+    ),
   completedTasks: z.array(short).max(10000),
   sessions: z
     .array(
@@ -181,12 +229,18 @@ export function loadState(): AppState {
 export function dateLabel(value: string) {
   return new Date(value).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
+export function reviewKey(attempt: AppState['attempts'][number]) {
+  return JSON.stringify([
+    attempt.questionId,
+    (attempt.snapshot?.question ?? attempt.question ?? '').trim(),
+  ]);
+}
 export function latestAttempts(state: AppState) {
   const latest = new Map<string, AppState['attempts'][number]>();
   for (const attempt of state.attempts) {
-    const old = latest.get(attempt.questionId);
-    if (!old || new Date(attempt.date) >= new Date(old.date))
-      latest.set(attempt.questionId, attempt);
+    const key = reviewKey(attempt);
+    const old = latest.get(key);
+    if (!old || new Date(attempt.date) > new Date(old.date)) latest.set(key, attempt);
   }
   return [...latest.values()];
 }
@@ -201,7 +255,7 @@ export function getStats(state: AppState) {
         .filter(
           (a) => a.mode === 'independent' && !a.assisted && a.feedback?.contentLevel === 'strong',
         )
-        .map((a) => a.questionId),
+        .map(reviewKey),
     ).size,
     due: latestAttempts(state).filter((a) => new Date(a.reviewDue).getTime() <= Date.now()).length,
   };

@@ -4679,3 +4679,141 @@ input[type='file'] {
     font-size: 9px;
   }
 }
+
+/* v0.2: opt-in local recording and evidence review. */
+.saved-recording {
+  display: grid;
+  gap: 15px;
+  border: 1px solid #dcebe2;
+  border-radius: 12px;
+  background: #f6faf7;
+  padding: 20px;
+  margin: 22px 0;
+}
+.saved-recording h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #527866;
+}
+.saved-recording audio {
+  width: 100%;
+  height: 40px;
+  max-width: 100%;
+}
+.saved-recording .inline-info,
+.saved-recording .error-message {
+  margin: 0;
+}
+.saved-recording .action-row {
+  justify-content: flex-end;
+  border-top: 1px solid #e2ece5;
+  padding-top: 11px;
+}
+.local-audio-card {
+  display: grid;
+  gap: 15px;
+  padding: 20px;
+  background: #f5f9f6;
+  border: 1px solid #e0eae3;
+  border-radius: 11px;
+  margin: 4px 0;
+}
+.local-audio-card .card-header p {
+  font-size: 11px;
+  color: #6c8177;
+  max-width: 430px;
+  line-height: 1.85;
+}
+.local-audio-card > .small {
+  font-size: 11px;
+  line-height: 1.9;
+}
+.audio-storage-numbers {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  color: #719381;
+}
+.audio-storage-numbers strong {
+  font-size: 24px;
+  letter-spacing: -0.5px;
+  color: #4a7963;
+  font-weight: 550;
+}
+.audio-storage-numbers small {
+  font-size: 12px;
+  color: #879e91;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.audio-storage-numbers > span {
+  font-size: 11px;
+}
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 10px;
+  color: #6d8678;
+  margin-bottom: 7px;
+}
+.progress-track {
+  height: 5px;
+  background: #e0eae3;
+  border-radius: 9px;
+  overflow: hidden;
+}
+.progress-track > div {
+  height: 100%;
+  background: #5d9d7c;
+  border-radius: 9px;
+  transition: width 0.2s;
+}
+.practice-main label.fact-row {
+  align-items: center;
+  border: 1px solid #dfeae4;
+  padding: 14px;
+  border-radius: 9px;
+  background: #f5faf6;
+  line-height: 1.85;
+  font-size: 12px;
+  color: #597767;
+}
+.practice-main label.fact-row input {
+  margin: 0;
+  flex-shrink: 0;
+}
+.practice-main .intro-editor .inline-info ul {
+  margin: 8px 0;
+  padding-left: 20px;
+  line-height: 1.9;
+}
+@media (max-width: 760px) {
+  .saved-recording,
+  .local-audio-card {
+    padding: 17px;
+  }
+  .saved-recording h3 {
+    font-size: 13px;
+  }
+  .saved-recording .action-row {
+    justify-content: flex-start;
+  }
+  .local-audio-card .action-row {
+    gap: 6px;
+  }
+  .local-audio-card .btn {
+    font-size: 11px;
+    white-space: normal;
+  }
+  .practice-main label.fact-row {
+    flex-wrap: nowrap;
+    align-items: flex-start;
+  }
+  .practice-main label.fact-row input {
+    margin-top: 4px;
+  }
+}

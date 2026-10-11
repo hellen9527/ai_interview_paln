@@ -18,12 +18,23 @@ import {
 import type { Attempt, PageProps } from '../types';
 import { dateLabel, downloadFile, getStats, latestAttempts } from '../lib/store';
 import { Empty, Modal } from './UI';
+import SavedRecording from './SavedRecording';
+import { deleteAudio } from '../lib/audioStore';
 const modeName = { read: '逐句跟读', keywords: '关键词复述', independent: '无稿回答' };
-export default function Reports({ state, update, startPractice, notify }: PageProps) {
+export default function Reports({
+  state,
+  update,
+  startPractice,
+  repeatAttempt,
+  notify,
+}: PageProps) {
   const [filter, setFilter] = useState('all'),
-    [selected, setSelected] = useState<Attempt | null>(null);
+    [selected, setSelected] = useState<Attempt | null>(null),
+    [deleting, setDeleting] = useState<string | null>(null);
   const stats = getStats(state);
-  const due = latestAttempts(state).filter((a) => new Date(a.reviewDue).getTime() <= Date.now());
+  const due = latestAttempts(state)
+    .filter((a) => new Date(a.reviewDue).getTime() <= Date.now())
+    .sort((a, b) => Date.parse(a.reviewDue) - Date.parse(b.reviewDue));
   const attempts = useMemo(
     () =>
       state.attempts.filter(
@@ -34,6 +45,49 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
       ),
     [state.attempts, filter],
   );
+  function repeat(attempt: Attempt) {
+    if (repeatAttempt) repeatAttempt(attempt);
+    else startPractice(attempt.questionId, 'independent');
+  }
+  async function remove(attempt: Attempt, audioOnly = false) {
+    if (deleting) return;
+    if (
+      !window.confirm(
+        audioOnly
+          ? '删除这条本机录音？文字和反馈会保留，音频无法撤销恢复。'
+          : '删除这条练习记录及其本机录音？此操作无法撤销。',
+      )
+    )
+      return;
+    setDeleting(attempt.id);
+    try {
+      if (attempt.audio) await deleteAudio(attempt.audio.key);
+      update((s) => ({
+        ...s,
+        attempts: audioOnly
+          ? s.attempts.map((a) => (a.id === attempt.id ? { ...a, audio: undefined } : a))
+          : s.attempts.filter((a) => a.id !== attempt.id),
+        sessions: audioOnly
+          ? s.sessions
+          : s.sessions.map((session) => ({
+              ...session,
+              attemptIds: session.attemptIds.filter((id) => id !== attempt.id),
+            })),
+      }));
+      setSelected((current) =>
+        current?.id === attempt.id
+          ? audioOnly
+            ? { ...current, audio: undefined }
+            : null
+          : current,
+      );
+      notify(audioOnly ? '本机录音已删除，文字记录已保留。' : '练习记录和对应录音已删除。');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '删除未完成，记录已保留，请重试。');
+    } finally {
+      setDeleting(null);
+    }
+  }
   function exportReport() {
     const lines = [
       '# Interview Pal 练习记录',
@@ -42,7 +96,7 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
         `\n## ${a.title}`,
         `时间：${new Date(a.date).toLocaleString('zh-CN')} · ${modeName[a.mode]} · ${a.assisted ? '使用辅助' : '无辅助'}`,
         `\n问题：${a.question || a.title}`,
-        `\n回答：\n${a.answer}`,
+        `\n回答：\n${a.answer || '本次仅保存录音，尚未转写。'}`,
         a.feedback
           ? `\n反馈：${a.feedback.summary}\n\n${a.feedback.improvements.map((i) => `- ${i.title}：${i.detail}`).join('\n')}`
           : '\n自主练习 · 未进行AI内容评估',
@@ -103,10 +157,7 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
           </p>
         </div>
         {due.length > 0 && (
-          <button
-            className="btn btn-primary"
-            onClick={() => startPractice(due[0].questionId, 'independent')}
-          >
+          <button className="btn btn-primary" onClick={() => repeat(due[0])}>
             开始复习
             <ArrowRight size={16} />
           </button>
@@ -141,10 +192,11 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
                   <span>
                     {dateLabel(a.date)} · {modeName[a.mode]}
                     {a.assisted ? ' · 使用辅助' : ''}
+                    {a.audio ? ' · 本机录音' : ''}
                   </span>
                 </span>
                 <span className={'badge ' + (a.feedback ? 'badge-teal' : '')}>
-                  {a.feedback ? '已获得内容反馈' : '自主练习'}
+                  {a.feedback ? '已获得内容反馈' : a.audio && !a.answer ? '录音练习' : '自主练习'}
                 </span>
                 <ArrowRight size={16} />
               </button>
@@ -178,8 +230,17 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
           )}
           <div className="report-answer">
             <span className="eyebrow">YOUR ANSWER</span>
-            <p className="english preserve-lines">{selected.answer}</p>
+            <p className="english preserve-lines">
+              {selected.answer || '本次仅保存录音，尚未转写，未进行内容评估。'}
+            </p>
           </div>
+          {selected.audio && (
+            <SavedRecording
+              audio={selected.audio}
+              removing={deleting === selected.id}
+              onRemove={() => void remove(selected, true)}
+            />
+          )}
           {selected.feedback ? (
             <div className="report-feedback">
               <h3>这次的内容反馈</h3>
@@ -210,19 +271,8 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
           <div className="modal-actions">
             <button
               className="btn btn-ghost danger"
-              onClick={() => {
-                if (!window.confirm('删除这条练习记录？此操作无法撤销。')) return;
-                update((s) => ({
-                  ...s,
-                  attempts: s.attempts.filter((a) => a.id !== selected.id),
-                  sessions: s.sessions.map((session) => ({
-                    ...session,
-                    attemptIds: session.attemptIds.filter((id) => id !== selected.id),
-                  })),
-                }));
-                setSelected(null);
-                notify('练习记录已删除。');
-              }}
+              disabled={deleting === selected.id}
+              onClick={() => void remove(selected)}
             >
               <Trash2 size={15} />
               删除记录
@@ -230,12 +280,12 @@ export default function Reports({ state, update, startPractice, notify }: PagePr
             <button
               className="btn btn-primary"
               onClick={() => {
-                const id = selected.questionId;
+                const attempt = selected;
                 setSelected(null);
-                startPractice(id, 'independent');
+                repeat(attempt);
               }}
             >
-              重练这个主题
+              {selected.question || selected.snapshot ? '按原题重练' : '重练这个主题'}
               <ArrowRight size={16} />
             </button>
           </div>

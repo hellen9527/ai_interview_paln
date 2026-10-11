@@ -23,7 +23,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react';
-import type { AppState, Health, Mode, Page, PageProps } from './types';
+import type { AppState, Attempt, Health, Mode, Page, PageProps, PracticeSnapshot } from './types';
 import {
   emptyState,
   getStats,
@@ -34,6 +34,7 @@ import {
   downloadFile,
 } from './lib/store';
 import { request } from './lib/api';
+import { snapshotForAttempt } from './lib/practice';
 import { questions } from './data/questions';
 import Dashboard from './components/Dashboard';
 import Roadmap from './components/Roadmap';
@@ -70,13 +71,19 @@ function Workspace() {
     [modal, setModal] = useState<'search' | 'help' | 'simulation' | null>(null),
     [search, setSearch] = useState(''),
     [rounds, setRounds] = useState(5),
-    [practice, setPractice] = useState({ target: 'intro', mode: 'read' as Mode, key: 0 }),
+    [practice, setPractice] = useState<{
+      target: string;
+      mode: Mode;
+      key: number;
+      snapshot?: PracticeSnapshot;
+    }>({ target: 'intro', mode: 'read', key: 0 }),
     [simulation, setSimulation] = useState<{
       queue: string[];
       index: number;
       before: string[];
     } | null>(null);
   const dirty = useRef(false),
+    busySaving = useRef(false),
     toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     main = useRef<HTMLDivElement>(null);
   const notify = useCallback((message: string) => {
@@ -97,8 +104,13 @@ function Workspace() {
       dirty.current = !!(event as CustomEvent<{ dirty: boolean }>).detail?.dirty;
     };
     window.addEventListener('interview-pal:unsaved', unsaved);
+    const saving = (event: Event) => {
+      busySaving.current = !!(event as CustomEvent<{ busy: boolean }>).detail?.busy;
+    };
+    window.addEventListener('interview-pal:busy', saving);
     return () => {
       window.removeEventListener('interview-pal:unsaved', unsaved);
+      window.removeEventListener('interview-pal:busy', saving);
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, [checkHealth]);
@@ -123,6 +135,10 @@ function Workspace() {
     return () => window.removeEventListener('keydown', shortcuts);
   }, []);
   function canLeave() {
+    if (busySaving.current) {
+      notify('录音正在写入本机，请稍等保存完成后再离开。');
+      return false;
+    }
     if (dirty.current && !window.confirm('当前页面有未保存的修改，确定离开吗？')) return false;
     if (
       page === 'practice' &&
@@ -171,6 +187,27 @@ function Workspace() {
     setDrawer(false);
     setModal(null);
     window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+  function repeatAttempt(attempt: Attempt) {
+    const snapshot = snapshotForAttempt(attempt);
+    if (!snapshot) {
+      notify('这条早期记录没有保存原问题，已返回原主题练习。');
+      startPractice(attempt.questionId, 'independent');
+      return;
+    }
+    if (!canLeave()) return;
+    setSimulation(null);
+    setPractice((p) => ({
+      target: attempt.questionId,
+      mode: 'independent',
+      key: p.key + 1,
+      snapshot,
+    }));
+    setPage('practice');
+    setDrawer(false);
+    setModal(null);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    if (!attempt.snapshot) notify('已恢复历史问题。该旧记录没有上下文快照，将使用空要点评估。');
   }
   function beginSimulation() {
     if (!canLeave()) return;
@@ -222,7 +259,15 @@ function Workspace() {
       [q.title, q.question, ...q.tags].join(' ').toLowerCase().includes(search.toLowerCase()),
     )
     .slice(0, 7);
-  const props: PageProps = { state, update, navigate, notify, startPractice, health },
+  const props: PageProps = {
+      state,
+      update,
+      navigate,
+      notify,
+      startPractice,
+      repeatAttempt,
+      health,
+    },
     stats = getStats(state),
     title =
       page === 'profile'
@@ -432,6 +477,7 @@ function Workspace() {
               key={practice.key}
               {...props}
               target={practice.target}
+              snapshot={practice.snapshot}
               initialMode={practice.mode}
               simulation={!!simulation}
               simulationIndex={simulation?.index ?? 0}
@@ -522,7 +568,7 @@ function Workspace() {
           <div className="inline-info">
             <ShieldCheck size={18} />
             <span>
-              本版本是个人本地训练工作台。录音只保留在当前页面；发音评分、实时通话和跨设备同步尚未开放。
+              本版本是个人本地训练工作台。可主动选择把录音保存到此浏览器，供复盘回听；发音评分、实时通话和跨设备同步尚未开放。
             </span>
           </div>
           <button

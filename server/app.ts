@@ -13,9 +13,12 @@ import {
   type Environment,
 } from './config.js';
 import { ApiError } from './errors.js';
+import { protectAnswer } from './answer.js';
 import { extractResume, MAX_UPLOAD_BYTES, validateAudio } from './files.js';
-import { feedbackPrompt, followupPrompt, introPrompt } from './prompts.js';
+import { answerPrompt, feedbackPrompt, followupPrompt, introPrompt } from './prompts.js';
 import {
+  answerInput,
+  answerOutput,
   feedbackInput,
   feedbackOutput,
   followupInput,
@@ -163,6 +166,18 @@ export function createApp(options: AppOptions = {}) {
       input.mode === 'independent' ? '' : ' 本次使用了提示或参考稿，不代表独立作答能力。';
     result.summary += `（仅分析提交的文字内容，未评测发音或口语流利度。${modeNote}）`;
     res.json({ ...result, model, ...(usage ? { usage } : {}) });
+  });
+
+  app.post('/api/answer', async (req, res) => {
+    const input = answerInput.parse(req.body);
+    const { result, model, usage } = await generate(
+      answerPrompt(input),
+      answerOutput,
+      config,
+      upstreamFetch,
+    );
+    const protectedResult = protectAnswer(input, result);
+    res.json({ ...protectedResult, model, ...(usage ? { usage } : {}) });
   });
 
   app.post('/api/followup', async (req, res) => {

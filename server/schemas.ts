@@ -49,6 +49,48 @@ export const followupInput = z
   })
   .strict();
 
+const answerProject = z
+  .object({
+    id: optionalText(1_000),
+    name: optionalText(80),
+    background: optionalText(1_600),
+    role: optionalText(1_600),
+    decision: optionalText(1_600),
+    result: optionalText(1_600),
+    reflection: optionalText(1_600),
+    tags: z.array(text(30)).max(8).default([]),
+  })
+  .strict();
+
+export const answerInput = z
+  .object({
+    kind: z.enum(['technical', 'project', 'reverse', 'clarify', 'followup']),
+    question: text(4_000),
+    points: z.array(text(2_000)).max(30),
+    referenceAnswer: z.string().trim().max(20_000).optional(),
+    project: answerProject.optional(),
+    job: z
+      .object({ role: optionalText(100), jd: optionalText(12_000) })
+      .strict()
+      .optional(),
+    facts: z
+      .array(z.object({ id: text(100), text: text(800), confirmed: z.boolean() }).strict())
+      .max(60)
+      .refine((facts) => new Set(facts.map((fact) => fact.id)).size === facts.length, {
+        message: '事实ID不能重复。',
+      })
+      .default([]),
+  })
+  .strict();
+
+export const answerOutput = z
+  .object({
+    text: text(8_000),
+    missingFacts: z.array(text(300)).max(8),
+    factIds: z.array(text(100)).max(60),
+  })
+  .strict();
+
 export const introOutput = z.object({ text: text(8_000) }).strict();
 export const feedbackOutput = z
   .object({
@@ -77,3 +119,5 @@ export const followupOutput = z
 export type IntroInput = z.infer<typeof introInput>;
 export type FeedbackInput = z.infer<typeof feedbackInput>;
 export type FollowupInput = z.infer<typeof followupInput>;
+export type AnswerInput = z.infer<typeof answerInput>;
+export type AnswerOutput = z.infer<typeof answerOutput>;
